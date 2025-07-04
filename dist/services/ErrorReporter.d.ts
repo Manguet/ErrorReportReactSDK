@@ -1,0 +1,50 @@
+import { ErrorReporterConfig } from '../types';
+import { SDKMonitor } from './SDKMonitor';
+import { QuotaManager } from './QuotaManager';
+export declare class ErrorReporter {
+    private config;
+    private breadcrumbManager;
+    private retryManager;
+    private rateLimiter;
+    private offlineManager;
+    private securityValidator;
+    private sdkMonitor;
+    private quotaManager;
+    private isInitialized;
+    private cleanupInterval;
+    constructor(config: ErrorReporterConfig);
+    private initialize;
+    private setupGlobalHandlers;
+    private interceptConsole;
+    private interceptFetch;
+    private trackNavigation;
+    private createErrorContext;
+    reportError(error: Error, additionalData?: Record<string, any>): Promise<void>;
+    reportMessage(message: string, level?: 'info' | 'warning' | 'error', additionalData?: Record<string, any>): Promise<void>;
+    private sendReport;
+    private sendReportDirectly;
+    private extractFilename;
+    private extractLineNumber;
+    addBreadcrumb(message: string, category?: string, level?: 'info' | 'warning' | 'error' | 'debug', data?: Record<string, any>): void;
+    logUserAction(action: string, data?: Record<string, any>): void;
+    logNavigation(from: string, to: string, data?: Record<string, any>): void;
+    setUserId(userId: string): void;
+    setUserEmail(email: string): void;
+    setCustomData(data: Record<string, any>): void;
+    clearBreadcrumbs(): void;
+    isEnabled(): boolean;
+    destroy(): void;
+    getStats(): {
+        queueSize: number;
+        isOnline: boolean;
+        rateLimitRemaining: number;
+        rateLimitReset: number;
+        sdkMetrics: ReturnType<SDKMonitor['getMetrics']>;
+        quotaUsage: ReturnType<QuotaManager['getUsageStats']>;
+        healthStatus: ReturnType<SDKMonitor['getHealthStatus']>;
+    };
+    flushQueue(): Promise<void>;
+    updateConfig(updates: Partial<ErrorReporterConfig>): void;
+    private validateConfiguration;
+}
+//# sourceMappingURL=ErrorReporter.d.ts.map
