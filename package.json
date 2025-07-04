@@ -2,6 +2,7 @@
   "name": "@error-explorer/react-error-reporter",
   "version": "1.0.0",
   "description": "React SDK for Error Explorer - client-side error tracking and reporting",
+  "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.esm.js",
   "types": "dist/index.d.ts",
@@ -60,9 +61,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/error-explorer"
+    "url": "https://github.com/Manguet/ErrorReportReactSDK"
   },
   "bugs": {
-    "url": "https://github.com/your-org/error-explorer/issues"
-  }
+    "url": "https://github.com/Manguet/ErrorReportReactSDK/issues"
+  },
+  "homepage": "https://github.com/Manguet/ErrorReportReactSDK#readme"
 }
