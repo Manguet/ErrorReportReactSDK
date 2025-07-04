@@ -1,8 +1,8 @@
 # React Error Reporter
 
-[![npm version](https://badge.fury.io/js/@error-explorer%2Freact-error-reporter.svg)](https://badge.fury.io/js/@error-explorer%2Freact-error-reporter)
-[![CI](https://github.com/your-org/error-explorer/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/error-explorer/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/your-org/error-explorer/branch/main/graph/badge.svg)](https://codecov.io/gh/your-org/error-explorer)
+[![npm version](https://badge.fury.io/js/error-explorer-react-reporter.svg)](https://badge.fury.io/js/error-explorer-react-reporter)
+[![CI](https://github.com/Manguet/ErrorReportReactSDK/actions/workflows/ci.yml/badge.svg)](https://github.com/Manguet/ErrorReportReactSDK/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/Manguet/ErrorReportReactSDK/branch/main/graph/badge.svg)](https://codecov.io/gh/Manguet/ErrorReportReactSDK)
 [![TypeScript](https://img.shields.io/badge/%3C%2F%3E-TypeScript-%230074c1.svg)](http://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -26,7 +26,7 @@ A comprehensive React SDK for Error Explorer - client-side error tracking and re
 ## Installation
 
 ```bash
-npm install @error-explorer/react-error-reporter
+npm install error-explorer-react-reporter
 ```
 
 ## Quick Start
@@ -35,7 +35,7 @@ npm install @error-explorer/react-error-reporter
 
 ```tsx
 import React from 'react';
-import { ErrorReporterProvider } from '@error-explorer/react-error-reporter';
+import { ErrorReporterProvider } from 'error-explorer-react-reporter';
 
 function App() {
   return (
@@ -57,7 +57,7 @@ function App() {
 
 ```tsx
 import React from 'react';
-import { ErrorBoundary, useErrorReporter } from '@error-explorer/react-error-reporter';
+import { ErrorBoundary, useErrorReporter } from 'error-explorer-react-reporter';
 
 function YourApp() {
   const { errorReporter } = useErrorReporter();
@@ -77,7 +77,7 @@ function YourApp() {
 
 ```tsx
 import React from 'react';
-import { useErrorReporter } from '@error-explorer/react-error-reporter';
+import { useErrorReporter } from 'error-explorer-react-reporter';
 
 function MyComponent() {
   const { reportError, reportMessage, addBreadcrumb, logUserAction } = useErrorReporter();
@@ -289,7 +289,7 @@ import type {
   Breadcrumb,
   ErrorContext,
   UseErrorReporter,
-} from '@error-explorer/react-error-reporter';
+} from 'error-explorer-react-reporter';
 ```
 
 ## Environment-specific Configuration
@@ -379,7 +379,7 @@ useEffect(() => {
 For minimal applications, use the lightweight version:
 
 ```tsx
-import { createMinimalErrorReporter } from '@error-explorer/react-error-reporter';
+import { createMinimalErrorReporter } from 'error-explorer-react-reporter';
 
 const minimalReporter = createMinimalErrorReporter();
 ```
