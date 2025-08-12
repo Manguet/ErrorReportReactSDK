@@ -26,6 +26,20 @@ export interface ErrorReporterConfig {
   requestTimeout?: number;
   allowedDomains?: string[];
   requireHttps?: boolean;
+  // Batch management
+  enableBatching?: boolean;
+  batchSize?: number;
+  batchTimeout?: number;
+  maxPayloadSize?: number;
+  // Compression
+  enableCompression?: boolean;
+  compressionThreshold?: number;
+  compressionLevel?: number;
+  // Circuit breaker
+  enableCircuitBreaker?: boolean;
+  circuitBreakerFailureThreshold?: number;
+  circuitBreakerTimeout?: number;
+  circuitBreakerResetTimeout?: number;
 }
 
 export interface Breadcrumb {
@@ -66,4 +80,48 @@ export interface ErrorBoundaryState {
   hasError: boolean;
   error?: Error;
   errorInfo?: ReactErrorInfo;
+}
+
+// Batch Manager interfaces
+export interface BatchConfig {
+  batchSize: number;
+  batchTimeout: number;
+  maxPayloadSize: number;
+}
+
+export interface BatchStats {
+  currentSize: number;
+  totalBatches: number;
+  totalErrors: number;
+  averageBatchSize: number;
+  lastSentAt?: number;
+}
+
+// Compression Service interfaces
+export interface CompressionConfig {
+  threshold: number;
+  level: number;
+}
+
+export interface CompressionStats {
+  totalCompressions: number;
+  totalDecompressions: number;
+  totalBytesSaved: number;
+  averageCompressionRatio: number;
+  compressionTime: number;
+}
+
+// Circuit Breaker interfaces
+export interface CircuitBreakerConfig {
+  failureThreshold: number;
+  timeout: number;
+  resetTimeout: number;
+}
+
+export interface CircuitBreakerStats {
+  state: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+  failureCount: number;
+  successCount: number;
+  lastFailureTime?: number;
+  nextRetryTime?: number;
 }

@@ -6,6 +6,9 @@ import { OfflineManager } from './OfflineManager';
 import { SecurityValidator } from './SecurityValidator';
 import { SDKMonitor } from './SDKMonitor';
 import { QuotaManager } from './QuotaManager';
+import { BatchManager } from './BatchManager';
+import { CompressionService } from './CompressionService';
+import { CircuitBreaker } from './CircuitBreaker';
 
 export class ErrorReporter {
   private config: ErrorReporterConfig;
@@ -16,6 +19,9 @@ export class ErrorReporter {
   private securityValidator: SecurityValidator;
   private sdkMonitor: SDKMonitor;
   private quotaManager: QuotaManager;
+  private batchManager: BatchManager;
+  private compressionService: CompressionService;
+  private circuitBreaker: CircuitBreaker;
   private isInitialized: boolean = false;
   private cleanupInterval: number | null = null;
 
@@ -36,6 +42,20 @@ export class ErrorReporter {
       enableOfflineSupport: true,
       maxOfflineQueueSize: 50,
       offlineQueueMaxAge: 24 * 60 * 60 * 1000,
+      // Batch management defaults
+      enableBatching: true,
+      batchSize: 10,
+      batchTimeout: 5000,
+      maxPayloadSize: 1048576, // 1MB
+      // Compression defaults
+      enableCompression: true,
+      compressionThreshold: 1024, // 1KB
+      compressionLevel: 6,
+      // Circuit breaker defaults
+      enableCircuitBreaker: true,
+      circuitBreakerFailureThreshold: 5,
+      circuitBreakerTimeout: 30000,
+      circuitBreakerResetTimeout: 60000,
       ...config,
     };
 
@@ -67,6 +87,29 @@ export class ErrorReporter {
       burstLimit: 50,
       burstWindowMs: 60000,
     });
+
+    // Initialize new services
+    this.batchManager = new BatchManager({
+      batchSize: this.config.batchSize || 10,
+      batchTimeout: this.config.batchTimeout || 5000,
+      maxPayloadSize: this.config.maxPayloadSize || 1048576
+    });
+
+    this.compressionService = new CompressionService({
+      threshold: this.config.compressionThreshold || 1024,
+      level: this.config.compressionLevel || 6
+    });
+
+    this.circuitBreaker = new CircuitBreaker({
+      failureThreshold: this.config.circuitBreakerFailureThreshold || 5,
+      timeout: this.config.circuitBreakerTimeout || 30000,
+      resetTimeout: this.config.circuitBreakerResetTimeout || 60000
+    });
+
+    // Set up batch manager send function
+    if (this.config.enableBatching) {
+      this.batchManager.setSendFunction((errors) => this.sendBatchDirectly(errors));
+    }
     
     this.initialize();
   }
@@ -273,7 +316,12 @@ export class ErrorReporter {
         console.log('[ErrorReporter] Reporting error:', report);
       }
 
-      await this.sendReport(report);
+      // Use batch manager if enabled, otherwise send directly
+      if (this.config.enableBatching) {
+        this.batchManager.addToBatch(report);
+      } else {
+        await this.sendReport(report);
+      }
       this.quotaManager.recordErrorSent(estimatedSize);
       this.sdkMonitor.recordErrorReported(estimatedSize);
     } catch (reportingError) {
@@ -332,6 +380,108 @@ export class ErrorReporter {
     }
   }
 
+  private async sendBatchDirectly(errors: ErrorReport[]): Promise<void> {
+    if (errors.length === 0) return;
+
+    const requestId = this.sdkMonitor.recordRequestStart();
+    
+    try {
+      // Use circuit breaker if enabled
+      const sendOperation = async () => {
+        // Apply compression if enabled and supported
+        let payload: any = errors;
+        
+        if (this.config.enableCompression && this.compressionService.isSupported()) {
+          const shouldCompress = this.compressionService.shouldCompress(errors);
+          if (shouldCompress) {
+            try {
+              const compressedData = await this.compressionService.compress(errors);
+              payload = { compressed: true, data: compressedData };
+            } catch (compressionError) {
+              if (this.config.debug) {
+                console.warn('[ErrorReporter] Compression failed, sending uncompressed:', compressionError);
+              }
+              // Fall back to uncompressed
+              payload = errors;
+            }
+          }
+        }
+
+        // Sanitize payload for security
+        const sanitizedPayload = this.securityValidator.sanitizeData(payload);
+        const payloadString = JSON.stringify(sanitizedPayload);
+        const payloadSize = new Blob([payloadString]).size;
+
+        // Validate payload size
+        const sizeValidation = this.securityValidator.validatePayloadSize(payloadString);
+        if (!sizeValidation.isValid) {
+          this.sdkMonitor.recordRequestFailure(requestId, new Error(sizeValidation.error!));
+          throw new Error(`Batch payload validation failed: ${sizeValidation.error}`);
+        }
+
+        // Create AbortController for timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.config.requestTimeout || 30000);
+
+        try {
+          const response = await fetch(`${this.config.apiUrl}/webhook/error/${this.config.projectToken}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: payloadString,
+            signal: controller.signal,
+          });
+
+          clearTimeout(timeoutId);
+
+          if (!response.ok) {
+            // Handle specific HTTP errors
+            if (response.status === 429) {
+              throw new Error('Rate limit exceeded by server');
+            }
+            if (response.status === 413) {
+              throw new Error('Batch payload too large');
+            }
+            
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          return response;
+        } catch (error) {
+          clearTimeout(timeoutId);
+          
+          if (error instanceof Error && error.name === 'AbortError') {
+            throw new Error('Request timeout');
+          }
+          
+          throw error;
+        }
+      };
+
+      // Execute with circuit breaker if enabled
+      if (this.config.enableCircuitBreaker) {
+        await this.circuitBreaker.execute(sendOperation);
+      } else {
+        await sendOperation();
+      }
+
+      this.sdkMonitor.recordRequestSuccess(requestId, new Blob([JSON.stringify(errors)]).size);
+      
+      if (this.config.debug) {
+        console.log(`[ErrorReporter] Batch of ${errors.length} errors sent successfully`);
+      }
+    } catch (error) {
+      this.sdkMonitor.recordRequestFailure(requestId, error as Error);
+      
+      if (this.config.debug) {
+        console.error('[ErrorReporter] Failed to send batch:', error);
+      }
+      
+      throw error;
+    }
+  }
+
   private async sendReportDirectly(report: ErrorReport): Promise<void> {
     
     const requestId = this.sdkMonitor.recordRequestStart();
@@ -387,12 +537,10 @@ export class ErrorReporter {
 
       try {
         
-        const response = await fetch(`${this.config.apiUrl}/webhook`, {
+        const response = await fetch(`${this.config.apiUrl}/webhook/error/${this.config.projectToken}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-Error-Reporter': 'react-sdk',
-            'X-SDK-Version': this.config.version || '1.0.0',
           },
           body: payloadString,
           signal: controller.signal,
@@ -553,6 +701,57 @@ export class ErrorReporter {
     if (this.config.debug) {
       console.log('[ErrorReporter] Config updated:', updates);
     }
+  }
+
+  // New service management methods
+  public async flushBatch(): Promise<void> {
+    if (this.config.enableBatching) {
+      await this.batchManager.flush();
+    }
+  }
+
+  public getBatchStats(): ReturnType<BatchManager['getStats']> | null {
+    return this.config.enableBatching ? this.batchManager.getStats() : null;
+  }
+
+  public getCompressionStats(): ReturnType<CompressionService['getStats']> | null {
+    return this.config.enableCompression ? this.compressionService.getStats() : null;
+  }
+
+  public getCircuitBreakerStats(): ReturnType<CircuitBreaker['getStats']> | null {
+    return this.config.enableCircuitBreaker ? this.circuitBreaker.getStats() : null;
+  }
+
+  public isCompressionSupported(): boolean {
+    return (this.config.enableCompression || false) && this.compressionService.isSupported();
+  }
+
+  public resetCompressionStats(): void {
+    if (this.config.enableCompression) {
+      this.compressionService.resetStats();
+    }
+  }
+
+  public resetCircuitBreaker(): void {
+    if (this.config.enableCircuitBreaker) {
+      this.circuitBreaker.reset();
+    }
+  }
+
+  public forceCircuitBreakerOpen(): void {
+    if (this.config.enableCircuitBreaker) {
+      this.circuitBreaker.forceOpen();
+    }
+  }
+
+  public forceCircuitBreakerClose(): void {
+    if (this.config.enableCircuitBreaker) {
+      this.circuitBreaker.forceClose();
+    }
+  }
+
+  public isCircuitBreakerOpen(): boolean {
+    return this.config.enableCircuitBreaker ? this.circuitBreaker.isCircuitOpen() : false;
   }
 
   private validateConfiguration(): void {

@@ -1,8 +1,8 @@
 # React Error Reporter
 
 [![npm version](https://badge.fury.io/js/error-explorer-react-reporter.svg)](https://badge.fury.io/js/error-explorer-react-reporter)
-[![CI](https://github.com/Manguet/ErrorReportReactSDK/actions/workflows/ci.yml/badge.svg)](https://github.com/Manguet/ErrorReportReactSDK/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/Manguet/ErrorReportReactSDK/branch/main/graph/badge.svg)](https://codecov.io/gh/Manguet/ErrorReportReactSDK)
+[![CI](https://github.com/your-org/error-explorer/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/error-explorer/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/your-org/error-explorer/branch/main/graph/badge.svg)](https://codecov.io/gh/your-org/error-explorer)
 [![TypeScript](https://img.shields.io/badge/%3C%2F%3E-TypeScript-%230074c1.svg)](http://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -42,7 +42,7 @@ function App() {
     <ErrorReporterProvider
       config={{
         projectToken: 'your-project-token',
-        apiUrl: 'https://your-error-explorer-instance.com',
+        apiUrl: 'https://error-explorer.com',
         environment: 'production',
         debug: process.env.NODE_ENV === 'development',
       }}
@@ -382,6 +382,39 @@ For minimal applications, use the lightweight version:
 import { createMinimalErrorReporter } from 'error-explorer-react-reporter';
 
 const minimalReporter = createMinimalErrorReporter();
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### "Invalid hook call" errors
+This usually means React is bundled with the SDK. Make sure React is listed as a peer dependency and not included in the bundle:
+```bash
+npm ls react  # Should show only one React version
+```
+
+#### CORS errors
+If you see CORS errors, the SDK automatically uses only standard headers (`Content-Type: application/json`) to avoid CORS preflight issues.
+
+#### Rate limiting
+If errors are being dropped due to rate limiting, adjust the configuration:
+```tsx
+config={{
+  maxRequestsPerMinute: 100,        // Increase from default 10
+  duplicateErrorWindow: 1000,       // Reduce from default 5000ms
+}}
+```
+
+#### Local development
+For local testing, disable HTTPS requirements and increase quotas:
+```tsx
+config={{
+  debug: true,
+  maxRequestsPerMinute: 100,
+  duplicateErrorWindow: 1000,
+  requireHttps: false,              // Allow HTTP in development
+}}
 ```
 
 ## Best Practices
