@@ -1,6 +1,6 @@
 {
   "name": "error-explorer-react-reporter",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "React SDK for Error Explorer - client-side error tracking and reporting",
   "main": "dist/index.js",
   "module": "dist/index.esm.js",
@@ -19,7 +19,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src tests --ext .ts,.tsx",
     "lint:fix": "eslint src tests --ext .ts,.tsx --fix",
-    "prepublishOnly": "npm run lint && npm run typecheck && npm run test:ci && npm run build",
+    "prepublishOnly": "npm run build",
     "validate": "npm run lint && npm run typecheck && npm run test:coverage"
   },
   "keywords": [

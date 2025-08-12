@@ -25,6 +25,17 @@ interface ErrorReporterConfig {
     requestTimeout?: number;
     allowedDomains?: string[];
     requireHttps?: boolean;
+    enableBatching?: boolean;
+    batchSize?: number;
+    batchTimeout?: number;
+    maxPayloadSize?: number;
+    enableCompression?: boolean;
+    compressionThreshold?: number;
+    compressionLevel?: number;
+    enableCircuitBreaker?: boolean;
+    circuitBreakerFailureThreshold?: number;
+    circuitBreakerTimeout?: number;
+    circuitBreakerResetTimeout?: number;
 }
 interface Breadcrumb {
     timestamp: number;
@@ -60,6 +71,41 @@ interface ErrorBoundaryState {
     hasError: boolean;
     error?: Error;
     errorInfo?: ReactErrorInfo;
+}
+interface BatchConfig {
+    batchSize: number;
+    batchTimeout: number;
+    maxPayloadSize: number;
+}
+interface BatchStats {
+    currentSize: number;
+    totalBatches: number;
+    totalErrors: number;
+    averageBatchSize: number;
+    lastSentAt?: number;
+}
+interface CompressionConfig {
+    threshold: number;
+    level: number;
+}
+interface CompressionStats {
+    totalCompressions: number;
+    totalDecompressions: number;
+    totalBytesSaved: number;
+    averageCompressionRatio: number;
+    compressionTime: number;
+}
+interface CircuitBreakerConfig {
+    failureThreshold: number;
+    timeout: number;
+    resetTimeout: number;
+}
+interface CircuitBreakerStats {
+    state: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+    failureCount: number;
+    successCount: number;
+    lastFailureTime?: number;
+    nextRetryTime?: number;
 }
 
 interface SDKMetrics {
@@ -168,6 +214,72 @@ declare class QuotaManager {
     private saveUsageToStorage;
 }
 
+declare class BatchManager {
+    private config;
+    private currentBatch;
+    private batchTimeout?;
+    private stats;
+    private sendFunction?;
+    constructor(config?: Partial<BatchConfig>);
+    configure(config: Partial<BatchConfig>): void;
+    setSendFunction(sendFn: (errors: ErrorReport[]) => Promise<void>): void;
+    addToBatch(error: ErrorReport): void;
+    flush(): Promise<void>;
+    getStats(): BatchStats;
+    private shouldSendBatch;
+    private calculatePayloadSize;
+    private startBatchTimeout;
+    private clearBatchTimeout;
+    private sendBatch;
+    private updateAverageBatchSize;
+    updateConfig(newConfig: Partial<BatchConfig>): void;
+    reset(): void;
+}
+
+declare class CompressionService {
+    private config;
+    private stats;
+    constructor(config?: Partial<CompressionConfig>);
+    configure(config: Partial<CompressionConfig>): void;
+    isSupported(): boolean;
+    shouldCompress(data: ErrorReport | ErrorReport[]): boolean;
+    compress(data: ErrorReport | ErrorReport[]): Promise<string>;
+    decompress(compressedData: string): Promise<ErrorReport | ErrorReport[]>;
+    compressString(data: string): string;
+    getStats(): CompressionStats;
+    resetStats(): void;
+    private updateCompressionStats;
+    private arrayBufferToBase64;
+    private base64ToArrayBuffer;
+    updateConfig(newConfig: Partial<CompressionConfig>): void;
+}
+
+type CircuitBreakerState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+declare class CircuitBreaker {
+    private config;
+    private state;
+    private failureCount;
+    private successCount;
+    private lastFailureTime?;
+    private nextRetryTime?;
+    constructor(config?: Partial<CircuitBreakerConfig>);
+    configure(config: Partial<CircuitBreakerConfig>): void;
+    execute<T>(operation: () => Promise<T>): Promise<T>;
+    isCallAllowed(): boolean;
+    onSuccess(): void;
+    onFailure(): void;
+    private tripCircuit;
+    reset(): void;
+    getState(): CircuitBreakerState;
+    getStats(): CircuitBreakerStats;
+    forceOpen(): void;
+    forceClose(): void;
+    isCircuitOpen(): boolean;
+    getTimeUntilRetry(): number;
+    updateConfig(newConfig: Partial<CircuitBreakerConfig>): void;
+    getFailureRate(): number;
+}
+
 declare class ErrorReporter {
     private config;
     private breadcrumbManager;
@@ -177,6 +289,9 @@ declare class ErrorReporter {
     private securityValidator;
     private sdkMonitor;
     private quotaManager;
+    private batchManager;
+    private compressionService;
+    private circuitBreaker;
     private isInitialized;
     private cleanupInterval;
     constructor(config: ErrorReporterConfig);
@@ -189,6 +304,7 @@ declare class ErrorReporter {
     reportError(error: Error, additionalData?: Record<string, any>): Promise<void>;
     reportMessage(message: string, level?: 'info' | 'warning' | 'error', additionalData?: Record<string, any>): Promise<void>;
     private sendReport;
+    private sendBatchDirectly;
     private sendReportDirectly;
     private extractFilename;
     private extractLineNumber;
@@ -212,6 +328,16 @@ declare class ErrorReporter {
     };
     flushQueue(): Promise<void>;
     updateConfig(updates: Partial<ErrorReporterConfig>): void;
+    flushBatch(): Promise<void>;
+    getBatchStats(): ReturnType<BatchManager['getStats']> | null;
+    getCompressionStats(): ReturnType<CompressionService['getStats']> | null;
+    getCircuitBreakerStats(): ReturnType<CircuitBreaker['getStats']> | null;
+    isCompressionSupported(): boolean;
+    resetCompressionStats(): void;
+    resetCircuitBreaker(): void;
+    forceCircuitBreakerOpen(): void;
+    forceCircuitBreakerClose(): void;
+    isCircuitBreakerOpen(): boolean;
     private validateConfiguration;
 }
 
@@ -243,6 +369,7 @@ declare class RetryManager {
     isRetrying(operationId: string): boolean;
     getRetryCount(operationId: string): number;
     clearRetryCount(operationId: string): void;
+    private shouldRetryError;
 }
 
 interface RateLimitConfig {
@@ -258,6 +385,11 @@ declare class RateLimiter {
     canMakeRequest(key?: string): boolean;
     canReportError(errorFingerprint: string): boolean;
     createErrorFingerprint(error: Error, additionalData?: Record<string, any>): string;
+    /**
+     * Extract stack trace signature by taking the first N meaningful frames
+     * and normalizing line numbers to avoid over-segmentation
+     */
+    private extractStackSignature;
     getRemainingRequests(key?: string): number;
     getResetTime(key?: string): number;
     cleanup(): void;
@@ -402,5 +534,5 @@ declare const generateSessionId: () => string;
  */
 declare const isDevelopment: () => boolean;
 
-export { BreadcrumbManager, ErrorBoundary, ErrorReporter, ErrorReporterProvider, OfflineManager, QuotaManager, RateLimiter, RetryManager, SDKMonitor, SecurityValidator, debounce, extractErrorInfo, generateSessionId, getBrowserInfo, getPerformanceInfo, isDevelopment, safeStringify, useErrorReporter };
-export type { Breadcrumb, ErrorBoundaryState, ErrorContext, ErrorReport, ErrorReporterConfig, ReactErrorInfo };
+export { BatchManager, BreadcrumbManager, CircuitBreaker, CompressionService, ErrorBoundary, ErrorReporter, ErrorReporterProvider, OfflineManager, QuotaManager, RateLimiter, RetryManager, SDKMonitor, SecurityValidator, debounce, extractErrorInfo, generateSessionId, getBrowserInfo, getPerformanceInfo, isDevelopment, safeStringify, useErrorReporter };
+export type { BatchConfig, BatchStats, Breadcrumb, CircuitBreakerConfig, CircuitBreakerStats, CompressionConfig, CompressionStats, ErrorBoundaryState, ErrorContext, ErrorReport, ErrorReporterConfig, ReactErrorInfo };

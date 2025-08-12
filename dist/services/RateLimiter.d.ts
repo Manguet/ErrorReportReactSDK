@@ -11,6 +11,11 @@ export declare class RateLimiter {
     canMakeRequest(key?: string): boolean;
     canReportError(errorFingerprint: string): boolean;
     createErrorFingerprint(error: Error, additionalData?: Record<string, any>): string;
+    /**
+     * Extract stack trace signature by taking the first N meaningful frames
+     * and normalizing line numbers to avoid over-segmentation
+     */
+    private extractStackSignature;
     getRemainingRequests(key?: string): number;
     getResetTime(key?: string): number;
     cleanup(): void;

@@ -22,6 +22,17 @@ export interface ErrorReporterConfig {
     requestTimeout?: number;
     allowedDomains?: string[];
     requireHttps?: boolean;
+    enableBatching?: boolean;
+    batchSize?: number;
+    batchTimeout?: number;
+    maxPayloadSize?: number;
+    enableCompression?: boolean;
+    compressionThreshold?: number;
+    compressionLevel?: number;
+    enableCircuitBreaker?: boolean;
+    circuitBreakerFailureThreshold?: number;
+    circuitBreakerTimeout?: number;
+    circuitBreakerResetTimeout?: number;
 }
 export interface Breadcrumb {
     timestamp: number;
@@ -57,5 +68,40 @@ export interface ErrorBoundaryState {
     hasError: boolean;
     error?: Error;
     errorInfo?: ReactErrorInfo;
+}
+export interface BatchConfig {
+    batchSize: number;
+    batchTimeout: number;
+    maxPayloadSize: number;
+}
+export interface BatchStats {
+    currentSize: number;
+    totalBatches: number;
+    totalErrors: number;
+    averageBatchSize: number;
+    lastSentAt?: number;
+}
+export interface CompressionConfig {
+    threshold: number;
+    level: number;
+}
+export interface CompressionStats {
+    totalCompressions: number;
+    totalDecompressions: number;
+    totalBytesSaved: number;
+    averageCompressionRatio: number;
+    compressionTime: number;
+}
+export interface CircuitBreakerConfig {
+    failureThreshold: number;
+    timeout: number;
+    resetTimeout: number;
+}
+export interface CircuitBreakerStats {
+    state: 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+    failureCount: number;
+    successCount: number;
+    lastFailureTime?: number;
+    nextRetryTime?: number;
 }
 //# sourceMappingURL=index.d.ts.map

@@ -1,6 +1,9 @@
 import { ErrorReporterConfig } from '../types';
 import { SDKMonitor } from './SDKMonitor';
 import { QuotaManager } from './QuotaManager';
+import { BatchManager } from './BatchManager';
+import { CompressionService } from './CompressionService';
+import { CircuitBreaker } from './CircuitBreaker';
 export declare class ErrorReporter {
     private config;
     private breadcrumbManager;
@@ -10,6 +13,9 @@ export declare class ErrorReporter {
     private securityValidator;
     private sdkMonitor;
     private quotaManager;
+    private batchManager;
+    private compressionService;
+    private circuitBreaker;
     private isInitialized;
     private cleanupInterval;
     constructor(config: ErrorReporterConfig);
@@ -22,6 +28,7 @@ export declare class ErrorReporter {
     reportError(error: Error, additionalData?: Record<string, any>): Promise<void>;
     reportMessage(message: string, level?: 'info' | 'warning' | 'error', additionalData?: Record<string, any>): Promise<void>;
     private sendReport;
+    private sendBatchDirectly;
     private sendReportDirectly;
     private extractFilename;
     private extractLineNumber;
@@ -45,6 +52,16 @@ export declare class ErrorReporter {
     };
     flushQueue(): Promise<void>;
     updateConfig(updates: Partial<ErrorReporterConfig>): void;
+    flushBatch(): Promise<void>;
+    getBatchStats(): ReturnType<BatchManager['getStats']> | null;
+    getCompressionStats(): ReturnType<CompressionService['getStats']> | null;
+    getCircuitBreakerStats(): ReturnType<CircuitBreaker['getStats']> | null;
+    isCompressionSupported(): boolean;
+    resetCompressionStats(): void;
+    resetCircuitBreaker(): void;
+    forceCircuitBreakerOpen(): void;
+    forceCircuitBreakerClose(): void;
+    isCircuitBreakerOpen(): boolean;
     private validateConfiguration;
 }
 //# sourceMappingURL=ErrorReporter.d.ts.map

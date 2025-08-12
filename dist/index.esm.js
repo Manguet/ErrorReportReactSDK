@@ -65,7 +65,7 @@ class RetryManager {
             return result;
         }
         catch (error) {
-            if (currentRetryCount >= this.config.maxRetries) {
+            if (currentRetryCount >= this.config.maxRetries || !this.shouldRetryError(error)) {
                 this.retryCount.delete(operationId);
                 throw error;
             }
@@ -95,6 +95,42 @@ class RetryManager {
     }
     clearRetryCount(operationId) {
         this.retryCount.delete(operationId);
+    }
+    shouldRetryError(error) {
+        if (!error)
+            return false;
+        // Check for authentication/authorization errors - don't retry these
+        if (error.status === 401 || error.status === 403) {
+            return false;
+        }
+        // Check error message for HTTP status codes
+        if (error.message && typeof error.message === 'string') {
+            const httpMatch = error.message.match(/HTTP (\d+):/);
+            if (httpMatch) {
+                const status = parseInt(httpMatch[1], 10);
+                // Don't retry on authentication/authorization errors
+                if (status === 401 || status === 403) {
+                    return false;
+                }
+                // Retry on server errors (5xx) and some client errors
+                return status >= 500 || status === 429 || status === 408;
+            }
+            // Check for specific error messages
+            if (error.message.includes('401') || error.message.includes('403') ||
+                error.message.toLowerCase().includes('unauthorized') ||
+                error.message.toLowerCase().includes('forbidden')) {
+                return false;
+            }
+        }
+        // Default: retry for network errors, timeouts, etc.
+        if (error.code === 'NETWORK_ERROR' ||
+            error.code === 'TIMEOUT' ||
+            error.message?.includes('network') ||
+            error.message?.includes('timeout')) {
+            return true;
+        }
+        // For unknown errors, be conservative and don't retry
+        return false;
     }
 }
 
@@ -139,17 +175,13 @@ class RateLimiter {
         return false;
     }
     createErrorFingerprint(error, additionalData) {
-        // Create a fingerprint based on error message, stack trace, and context
-        const components = [
-            error.message,
-            error.stack?.split('\n')[0] || '',
-            additionalData?.type || '',
-            window.location.pathname,
-            // Include additional context for better fingerprinting
-            JSON.stringify(additionalData || {}),
-        ];
+        // Enhanced fingerprint combining stack trace signature + message
+        const stackSignature = this.extractStackSignature(error.stack || '', 3);
+        const messageSignature = (error.message || '').substring(0, 100);
+        const errorType = error.constructor.name;
+        // Combine signatures
+        const combined = `${stackSignature}|${messageSignature}|${errorType}`;
         // Use a simple hash to ensure different inputs produce different outputs
-        const combined = components.join('|');
         let hash = 0;
         for (let i = 0; i < combined.length; i++) {
             const char = combined.charCodeAt(i);
@@ -158,6 +190,31 @@ class RateLimiter {
         }
         // Convert to base64-like string and ensure 32 chars
         return btoa(hash.toString()).substring(0, 32).padEnd(32, '0');
+    }
+    /**
+     * Extract stack trace signature by taking the first N meaningful frames
+     * and normalizing line numbers to avoid over-segmentation
+     */
+    extractStackSignature(stackTrace, depth = 3) {
+        if (!stackTrace)
+            return '';
+        const lines = stackTrace.split('\n');
+        // Filter meaningful frames (ignore empty lines and browser internals)
+        const meaningfulFrames = lines.filter(line => {
+            const trimmed = line.trim();
+            return trimmed &&
+                !trimmed.includes('chrome-extension://') &&
+                !trimmed.includes('webpack://') &&
+                !trimmed.includes('node_modules/react-dom') &&
+                (trimmed.includes('.jsx') || trimmed.includes('.js') || trimmed.includes('.tsx') || trimmed.includes('.ts'));
+        });
+        // Take first N frames
+        const frames = meaningfulFrames.slice(0, depth);
+        // Normalize each frame (remove specific line numbers and columns)
+        const normalizedFrames = frames.map(frame => {
+            return frame.replace(/:\d+:\d+/g, ':XX:XX').replace(/:\d+/g, ':XX');
+        });
+        return normalizedFrames.join('|');
     }
     getRemainingRequests(key = 'default') {
         const requestInfo = this.requests.get(key);
@@ -897,6 +954,433 @@ class QuotaManager {
     }
 }
 
+class BatchManager {
+    constructor(config) {
+        this.currentBatch = [];
+        this.stats = {
+            currentSize: 0,
+            totalBatches: 0,
+            totalErrors: 0,
+            averageBatchSize: 0
+        };
+        this.config = {
+            batchSize: 10,
+            batchTimeout: 5000,
+            maxPayloadSize: 1048576, // 1MB
+            ...config
+        };
+    }
+    configure(config) {
+        this.config = { ...this.config, ...config };
+    }
+    setSendFunction(sendFn) {
+        this.sendFunction = sendFn;
+    }
+    addToBatch(error) {
+        this.currentBatch.push(error);
+        this.stats.currentSize = this.currentBatch.length;
+        this.stats.totalErrors++;
+        // Check if we should send the batch
+        if (this.shouldSendBatch()) {
+            this.sendBatch();
+        }
+        else if (!this.batchTimeout) {
+            // Start timeout for partial batch
+            this.startBatchTimeout();
+        }
+    }
+    async flush() {
+        if (this.currentBatch.length > 0) {
+            await this.sendBatch();
+        }
+    }
+    getStats() {
+        return { ...this.stats };
+    }
+    shouldSendBatch() {
+        if (this.currentBatch.length >= this.config.batchSize) {
+            return true;
+        }
+        // Check payload size
+        const payloadSize = this.calculatePayloadSize();
+        return payloadSize >= this.config.maxPayloadSize;
+    }
+    calculatePayloadSize() {
+        try {
+            return new TextEncoder().encode(JSON.stringify(this.currentBatch)).length;
+        }
+        catch {
+            // Fallback estimation
+            return JSON.stringify(this.currentBatch).length * 2;
+        }
+    }
+    startBatchTimeout() {
+        this.batchTimeout = window.setTimeout(() => {
+            if (this.currentBatch.length > 0) {
+                this.sendBatch();
+            }
+        }, this.config.batchTimeout);
+    }
+    clearBatchTimeout() {
+        if (this.batchTimeout) {
+            clearTimeout(this.batchTimeout);
+            this.batchTimeout = undefined;
+        }
+    }
+    async sendBatch() {
+        if (this.currentBatch.length === 0) {
+            return;
+        }
+        const batch = [...this.currentBatch];
+        this.currentBatch = [];
+        this.stats.currentSize = 0;
+        this.clearBatchTimeout();
+        try {
+            if (this.sendFunction) {
+                await this.sendFunction(batch);
+                // Update stats on successful send
+                this.stats.totalBatches++;
+                this.stats.lastSentAt = Date.now();
+                this.updateAverageBatchSize(batch.length);
+            }
+        }
+        catch (error) {
+            // On failure, we could implement retry logic or queuing
+            console.error('Failed to send batch:', error);
+            throw error;
+        }
+    }
+    updateAverageBatchSize(batchSize) {
+        const totalErrors = this.stats.totalErrors;
+        const totalBatches = this.stats.totalBatches;
+        if (totalBatches > 0) {
+            this.stats.averageBatchSize = totalErrors / totalBatches;
+        }
+    }
+    updateConfig(newConfig) {
+        this.config = { ...this.config, ...newConfig };
+    }
+    reset() {
+        this.currentBatch = [];
+        this.stats = {
+            currentSize: 0,
+            totalBatches: 0,
+            totalErrors: 0,
+            averageBatchSize: 0
+        };
+        this.clearBatchTimeout();
+    }
+}
+
+class CompressionService {
+    constructor(config) {
+        this.stats = {
+            totalCompressions: 0,
+            totalDecompressions: 0,
+            totalBytesSaved: 0,
+            averageCompressionRatio: 0,
+            compressionTime: 0
+        };
+        this.config = {
+            threshold: 1024, // 1KB
+            level: 6,
+            ...config
+        };
+    }
+    configure(config) {
+        this.config = { ...this.config, ...config };
+    }
+    isSupported() {
+        // Check if compression is supported in the browser
+        return typeof CompressionStream !== 'undefined' && typeof DecompressionStream !== 'undefined';
+    }
+    shouldCompress(data) {
+        try {
+            const jsonString = JSON.stringify(data);
+            const size = new TextEncoder().encode(jsonString).length;
+            return size >= this.config.threshold;
+        }
+        catch {
+            return false;
+        }
+    }
+    async compress(data) {
+        if (!this.isSupported()) {
+            throw new Error('Compression not supported in this browser');
+        }
+        const startTime = performance.now();
+        try {
+            const jsonString = JSON.stringify(data);
+            const originalBytes = new TextEncoder().encode(jsonString);
+            // Use browser's CompressionStream if available
+            const compressionStream = new CompressionStream('gzip');
+            const writer = compressionStream.writable.getWriter();
+            const reader = compressionStream.readable.getReader();
+            // Write data
+            await writer.write(originalBytes);
+            await writer.close();
+            // Read compressed data
+            const chunks = [];
+            let done = false;
+            while (!done) {
+                const { value, done: readerDone } = await reader.read();
+                done = readerDone;
+                if (value) {
+                    chunks.push(value);
+                }
+            }
+            // Combine chunks
+            const compressedLength = chunks.reduce((len, chunk) => len + chunk.length, 0);
+            const compressedBytes = new Uint8Array(compressedLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+                compressedBytes.set(chunk, offset);
+                offset += chunk.length;
+            }
+            // Convert to base64
+            const compressedBase64 = this.arrayBufferToBase64(compressedBytes.buffer);
+            // Update stats
+            const compressionTime = performance.now() - startTime;
+            this.updateCompressionStats(originalBytes.length, compressedBytes.length, compressionTime);
+            return compressedBase64;
+        }
+        catch (error) {
+            console.error('Compression failed:', error);
+            throw error;
+        }
+    }
+    async decompress(compressedData) {
+        if (!this.isSupported()) {
+            throw new Error('Decompression not supported in this browser');
+        }
+        const startTime = performance.now();
+        try {
+            // Convert from base64
+            const compressedBytes = this.base64ToArrayBuffer(compressedData);
+            // Use browser's DecompressionStream
+            const decompressionStream = new DecompressionStream('gzip');
+            const writer = decompressionStream.writable.getWriter();
+            const reader = decompressionStream.readable.getReader();
+            // Write compressed data
+            await writer.write(new Uint8Array(compressedBytes));
+            await writer.close();
+            // Read decompressed data
+            const chunks = [];
+            let done = false;
+            while (!done) {
+                const { value, done: readerDone } = await reader.read();
+                done = readerDone;
+                if (value) {
+                    chunks.push(value);
+                }
+            }
+            // Combine chunks and convert to string
+            const decompressedLength = chunks.reduce((len, chunk) => len + chunk.length, 0);
+            const decompressedBytes = new Uint8Array(decompressedLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+                decompressedBytes.set(chunk, offset);
+                offset += chunk.length;
+            }
+            const decompressedString = new TextDecoder().decode(decompressedBytes);
+            // Update stats
+            const decompressionTime = performance.now() - startTime;
+            this.stats.totalDecompressions++;
+            this.stats.compressionTime += decompressionTime;
+            return JSON.parse(decompressedString);
+        }
+        catch (error) {
+            console.error('Decompression failed:', error);
+            throw error;
+        }
+    }
+    // Fallback compression using simple string compression (not as efficient but more compatible)
+    compressString(data) {
+        // Simple LZ-string style compression for compatibility
+        const dict = {};
+        const result = [];
+        let dictIndex = 256;
+        let current = '';
+        for (let i = 0; i < data.length; i++) {
+            const char = data[i];
+            const combined = current + char;
+            if (dict[combined] !== undefined) {
+                current = combined;
+            }
+            else {
+                result.push(dict[current] !== undefined ? dict[current] : current);
+                dict[combined] = dictIndex++;
+                current = char;
+            }
+        }
+        if (current !== '') {
+            result.push(dict[current] !== undefined ? dict[current] : current);
+        }
+        return JSON.stringify(result);
+    }
+    getStats() {
+        return { ...this.stats };
+    }
+    resetStats() {
+        this.stats = {
+            totalCompressions: 0,
+            totalDecompressions: 0,
+            totalBytesSaved: 0,
+            averageCompressionRatio: 0,
+            compressionTime: 0
+        };
+    }
+    updateCompressionStats(originalSize, compressedSize, compressionTime) {
+        this.stats.totalCompressions++;
+        this.stats.totalBytesSaved += Math.max(0, originalSize - compressedSize);
+        this.stats.compressionTime += compressionTime;
+        // Update average compression ratio
+        const ratio = compressedSize / originalSize;
+        this.stats.averageCompressionRatio =
+            (this.stats.averageCompressionRatio * (this.stats.totalCompressions - 1) + ratio) /
+                this.stats.totalCompressions;
+    }
+    arrayBufferToBase64(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.byteLength; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+    }
+    base64ToArrayBuffer(base64) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+    updateConfig(newConfig) {
+        this.config = { ...this.config, ...newConfig };
+    }
+}
+
+class CircuitBreaker {
+    constructor(config) {
+        this.state = 'CLOSED';
+        this.failureCount = 0;
+        this.successCount = 0;
+        this.config = {
+            failureThreshold: 5,
+            timeout: 30000, // 30 seconds
+            resetTimeout: 60000, // 1 minute
+            ...config
+        };
+    }
+    configure(config) {
+        this.config = { ...this.config, ...config };
+    }
+    async execute(operation) {
+        if (!this.isCallAllowed()) {
+            throw new Error('Circuit breaker is OPEN - calls are not allowed');
+        }
+        try {
+            const result = await operation();
+            this.onSuccess();
+            return result;
+        }
+        catch (error) {
+            this.onFailure();
+            throw error;
+        }
+    }
+    isCallAllowed() {
+        const now = Date.now();
+        switch (this.state) {
+            case 'CLOSED':
+                return true;
+            case 'OPEN':
+                // Check if we should transition to HALF_OPEN
+                if (this.nextRetryTime && now >= this.nextRetryTime) {
+                    this.state = 'HALF_OPEN';
+                    return true;
+                }
+                return false;
+            case 'HALF_OPEN':
+                return true;
+            default:
+                return false;
+        }
+    }
+    onSuccess() {
+        this.successCount++;
+        if (this.state === 'HALF_OPEN') {
+            // If we're in HALF_OPEN and got a success, reset the circuit breaker
+            this.reset();
+        }
+    }
+    onFailure() {
+        this.failureCount++;
+        this.lastFailureTime = Date.now();
+        if (this.state === 'HALF_OPEN') {
+            // If we're in HALF_OPEN and got a failure, go back to OPEN
+            this.tripCircuit();
+        }
+        else if (this.failureCount >= this.config.failureThreshold) {
+            // If we've reached the failure threshold, trip the circuit
+            this.tripCircuit();
+        }
+    }
+    tripCircuit() {
+        this.state = 'OPEN';
+        this.nextRetryTime = Date.now() + this.config.timeout;
+    }
+    reset() {
+        this.state = 'CLOSED';
+        this.failureCount = 0;
+        this.successCount = 0;
+        this.lastFailureTime = undefined;
+        this.nextRetryTime = undefined;
+    }
+    getState() {
+        return this.state;
+    }
+    getStats() {
+        return {
+            state: this.state,
+            failureCount: this.failureCount,
+            successCount: this.successCount,
+            lastFailureTime: this.lastFailureTime,
+            nextRetryTime: this.nextRetryTime
+        };
+    }
+    // Force the circuit breaker to OPEN state
+    forceOpen() {
+        this.state = 'OPEN';
+        this.nextRetryTime = Date.now() + this.config.timeout;
+    }
+    // Force the circuit breaker to CLOSED state
+    forceClose() {
+        this.reset();
+    }
+    // Check if circuit breaker is currently allowing calls
+    isCircuitOpen() {
+        return this.state === 'OPEN' && !this.isCallAllowed();
+    }
+    // Get time until next retry attempt (only relevant when circuit is OPEN)
+    getTimeUntilRetry() {
+        if (this.state === 'OPEN' && this.nextRetryTime) {
+            return Math.max(0, this.nextRetryTime - Date.now());
+        }
+        return 0;
+    }
+    // Update configuration
+    updateConfig(newConfig) {
+        this.config = { ...this.config, ...newConfig };
+    }
+    // Get current failure rate (failures per total calls)
+    getFailureRate() {
+        const totalCalls = this.successCount + this.failureCount;
+        return totalCalls > 0 ? this.failureCount / totalCalls : 0;
+    }
+}
+
 class ErrorReporter {
     constructor(config) {
         this.isInitialized = false;
@@ -917,6 +1401,20 @@ class ErrorReporter {
             enableOfflineSupport: true,
             maxOfflineQueueSize: 50,
             offlineQueueMaxAge: 24 * 60 * 60 * 1000,
+            // Batch management defaults
+            enableBatching: true,
+            batchSize: 10,
+            batchTimeout: 5000,
+            maxPayloadSize: 1048576, // 1MB
+            // Compression defaults
+            enableCompression: true,
+            compressionThreshold: 1024, // 1KB
+            compressionLevel: 6,
+            // Circuit breaker defaults
+            enableCircuitBreaker: true,
+            circuitBreakerFailureThreshold: 5,
+            circuitBreakerTimeout: 30000,
+            circuitBreakerResetTimeout: 60000,
             ...config,
         };
         this.breadcrumbManager = new BreadcrumbManager(this.config.maxBreadcrumbs);
@@ -944,6 +1442,25 @@ class ErrorReporter {
             burstLimit: 50,
             burstWindowMs: 60000,
         });
+        // Initialize new services
+        this.batchManager = new BatchManager({
+            batchSize: this.config.batchSize || 10,
+            batchTimeout: this.config.batchTimeout || 5000,
+            maxPayloadSize: this.config.maxPayloadSize || 1048576
+        });
+        this.compressionService = new CompressionService({
+            threshold: this.config.compressionThreshold || 1024,
+            level: this.config.compressionLevel || 6
+        });
+        this.circuitBreaker = new CircuitBreaker({
+            failureThreshold: this.config.circuitBreakerFailureThreshold || 5,
+            timeout: this.config.circuitBreakerTimeout || 30000,
+            resetTimeout: this.config.circuitBreakerResetTimeout || 60000
+        });
+        // Set up batch manager send function
+        if (this.config.enableBatching) {
+            this.batchManager.setSendFunction((errors) => this.sendBatchDirectly(errors));
+        }
         this.initialize();
     }
     initialize() {
@@ -1100,7 +1617,13 @@ class ErrorReporter {
             if (this.config.debug) {
                 console.log('[ErrorReporter] Reporting error:', report);
             }
-            await this.sendReport(report);
+            // Use batch manager if enabled, otherwise send directly
+            if (this.config.enableBatching) {
+                this.batchManager.addToBatch(report);
+            }
+            else {
+                await this.sendReport(report);
+            }
             this.quotaManager.recordErrorSent(estimatedSize);
             this.sdkMonitor.recordErrorReported(estimatedSize);
         }
@@ -1150,6 +1673,94 @@ class ErrorReporter {
             }
         }
     }
+    async sendBatchDirectly(errors) {
+        if (errors.length === 0)
+            return;
+        const requestId = this.sdkMonitor.recordRequestStart();
+        try {
+            // Use circuit breaker if enabled
+            const sendOperation = async () => {
+                // Apply compression if enabled and supported
+                let payload = errors;
+                if (this.config.enableCompression && this.compressionService.isSupported()) {
+                    const shouldCompress = this.compressionService.shouldCompress(errors);
+                    if (shouldCompress) {
+                        try {
+                            const compressedData = await this.compressionService.compress(errors);
+                            payload = { compressed: true, data: compressedData };
+                        }
+                        catch (compressionError) {
+                            if (this.config.debug) {
+                                console.warn('[ErrorReporter] Compression failed, sending uncompressed:', compressionError);
+                            }
+                            // Fall back to uncompressed
+                            payload = errors;
+                        }
+                    }
+                }
+                // Sanitize payload for security
+                const sanitizedPayload = this.securityValidator.sanitizeData(payload);
+                const payloadString = JSON.stringify(sanitizedPayload);
+                const payloadSize = new Blob([payloadString]).size;
+                // Validate payload size
+                const sizeValidation = this.securityValidator.validatePayloadSize(payloadString);
+                if (!sizeValidation.isValid) {
+                    this.sdkMonitor.recordRequestFailure(requestId, new Error(sizeValidation.error));
+                    throw new Error(`Batch payload validation failed: ${sizeValidation.error}`);
+                }
+                // Create AbortController for timeout
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), this.config.requestTimeout || 30000);
+                try {
+                    const response = await fetch(`${this.config.apiUrl}/webhook/error/${this.config.projectToken}`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: payloadString,
+                        signal: controller.signal,
+                    });
+                    clearTimeout(timeoutId);
+                    if (!response.ok) {
+                        // Handle specific HTTP errors
+                        if (response.status === 429) {
+                            throw new Error('Rate limit exceeded by server');
+                        }
+                        if (response.status === 413) {
+                            throw new Error('Batch payload too large');
+                        }
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    return response;
+                }
+                catch (error) {
+                    clearTimeout(timeoutId);
+                    if (error instanceof Error && error.name === 'AbortError') {
+                        throw new Error('Request timeout');
+                    }
+                    throw error;
+                }
+            };
+            // Execute with circuit breaker if enabled
+            if (this.config.enableCircuitBreaker) {
+                await this.circuitBreaker.execute(sendOperation);
+            }
+            else {
+                await sendOperation();
+            }
+            this.sdkMonitor.recordRequestSuccess(requestId, new Blob([JSON.stringify(errors)]).size);
+            if (this.config.debug) {
+                console.log(`[ErrorReporter] Batch of ${errors.length} errors sent successfully`);
+            }
+        }
+        catch (error) {
+            this.sdkMonitor.recordRequestFailure(requestId, error);
+            if (this.config.debug) {
+                console.error('[ErrorReporter] Failed to send batch:', error);
+            }
+            throw error;
+        }
+    }
     async sendReportDirectly(report) {
         const requestId = this.sdkMonitor.recordRequestStart();
         try {
@@ -1191,12 +1802,10 @@ class ErrorReporter {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), this.config.requestTimeout || 30000);
             try {
-                const response = await fetch(`${this.config.apiUrl}/webhook`, {
+                const response = await fetch(`${this.config.apiUrl}/webhook/error/${this.config.projectToken}`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'X-Error-Reporter': 'react-sdk',
-                        'X-SDK-Version': this.config.version || '1.0.0',
                     },
                     body: payloadString,
                     signal: controller.signal,
@@ -1319,6 +1928,47 @@ class ErrorReporter {
         if (this.config.debug) {
             console.log('[ErrorReporter] Config updated:', updates);
         }
+    }
+    // New service management methods
+    async flushBatch() {
+        if (this.config.enableBatching) {
+            await this.batchManager.flush();
+        }
+    }
+    getBatchStats() {
+        return this.config.enableBatching ? this.batchManager.getStats() : null;
+    }
+    getCompressionStats() {
+        return this.config.enableCompression ? this.compressionService.getStats() : null;
+    }
+    getCircuitBreakerStats() {
+        return this.config.enableCircuitBreaker ? this.circuitBreaker.getStats() : null;
+    }
+    isCompressionSupported() {
+        return (this.config.enableCompression || false) && this.compressionService.isSupported();
+    }
+    resetCompressionStats() {
+        if (this.config.enableCompression) {
+            this.compressionService.resetStats();
+        }
+    }
+    resetCircuitBreaker() {
+        if (this.config.enableCircuitBreaker) {
+            this.circuitBreaker.reset();
+        }
+    }
+    forceCircuitBreakerOpen() {
+        if (this.config.enableCircuitBreaker) {
+            this.circuitBreaker.forceOpen();
+        }
+    }
+    forceCircuitBreakerClose() {
+        if (this.config.enableCircuitBreaker) {
+            this.circuitBreaker.forceClose();
+        }
+    }
+    isCircuitBreakerOpen() {
+        return this.config.enableCircuitBreaker ? this.circuitBreaker.isCircuitOpen() : false;
     }
     validateConfiguration() {
         // Validate API URL
@@ -2972,5 +3622,5 @@ const isDevelopment = () => {
         window.location.hostname === '127.0.0.1';
 };
 
-export { BreadcrumbManager, ErrorBoundary, ErrorReporter, ErrorReporterProvider, OfflineManager, QuotaManager, RateLimiter, RetryManager, SDKMonitor, SecurityValidator, debounce, extractErrorInfo, generateSessionId, getBrowserInfo, getPerformanceInfo, isDevelopment, safeStringify, useErrorReporter };
+export { BatchManager, BreadcrumbManager, CircuitBreaker, CompressionService, ErrorBoundary, ErrorReporter, ErrorReporterProvider, OfflineManager, QuotaManager, RateLimiter, RetryManager, SDKMonitor, SecurityValidator, debounce, extractErrorInfo, generateSessionId, getBrowserInfo, getPerformanceInfo, isDevelopment, safeStringify, useErrorReporter };
 //# sourceMappingURL=index.esm.js.map

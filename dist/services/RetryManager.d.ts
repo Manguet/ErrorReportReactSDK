@@ -12,6 +12,7 @@ export declare class RetryManager {
     isRetrying(operationId: string): boolean;
     getRetryCount(operationId: string): number;
     clearRetryCount(operationId: string): void;
+    private shouldRetryError;
 }
 export {};
 //# sourceMappingURL=RetryManager.d.ts.map
