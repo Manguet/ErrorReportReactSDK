@@ -1,6 +1,6 @@
 {
   "name": "error-explorer-react-reporter",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "React SDK for Error Explorer - client-side error tracking and reporting",
   "main": "dist/index.js",
   "module": "dist/index.esm.js",
